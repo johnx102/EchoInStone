@@ -1,96 +1,61 @@
-# serverless_main.py
-#
-import os
-import logging
-from functools import lru_cache
+import argparse
 from EchoInStone.utils import configure_logging
+import logging
+
 from EchoInStone.capture.downloader_factory import get_downloader
 from EchoInStone.processing import AudioProcessingOrchestrator, WhisperAudioTranscriber, PyannoteDiarizer, SpeakerAligner
 from EchoInStone.utils import DataSaver
+from EchoInStone.utils import timer, log_time
 
-# Global instances for reuse across invocations
-_transcriber = None
-_diarizer = None
+# Configure logging
+configure_logging(logging.INFO)
+logger = logging.getLogger(__name__)
 
-@lru_cache(maxsize=1)
-def get_transcriber():
-    """Lazy-load and cache transcriber to avoid cold start penalties"""
-    global _transcriber
-    if _transcriber is None:
-        logging.info("Loading Whisper model (cold start)...")
-        _transcriber = WhisperAudioTranscriber()
-    return _transcriber
 
-@lru_cache(maxsize=1) 
-def get_diarizer():
-    """Lazy-load and cache diarizer to avoid cold start penalties"""
-    global _diarizer
-    if _diarizer is None:
-        logging.info("Loading Pyannote model (cold start)...")
-        _diarizer = PyannoteDiarizer()
-    return _diarizer
+# Youtube = 'https://www.youtube.com/watch?v=ipXG9iQq-Tw'
+# Podcast = 'https://radiofrance-podcast.net/podcast09/rss_13957.xml'
 
-def serverless_handler(event, context=None):
+# Test Youtube video = 'https://www.youtube.com/watch?v=plZRCMx_Jd8'
+# Test Podcast = 'https://radiofrance-podcast.net/podcast09/rss_13957.xml'
+# Test MP3 File = 'https://media.radiofrance-podcast.net/podcast09/25425-13.02.2025-ITEMA_24028677-2025C53905E0006-NET_MFC_D378B90D-D570-44E9-AB5A-F0CC63B05A14-21.mp3'
+
+
+@timer
+def main(echo_input, output_dir, transcription_output):
     """
-    Serverless function handler - optimized for platforms like:
-    - RunPod Serverless
-    - Modal
-    - AWS Lambda (with container support)
-    - Google Cloud Run
+    Main function to orchestrate the audio processing pipeline.
     """
-    configure_logging(logging.INFO)
-    logger = logging.getLogger(__name__)
-    
-    # Extract parameters from event
-    echo_input = event.get('url') or event.get('echo_input')
-    output_dir = event.get('output_dir', '/tmp/results')
-    transcription_output = event.get('output_file', 'transcription.json')
-    
-    if not echo_input:
-        return {"error": "Missing 'url' parameter"}
-    
-    try:
-        # Initialize components (reuse cached models)
-        downloader = get_downloader(echo_input, output_dir)
-        transcriber = get_transcriber()  # Cached
-        diarizer = get_diarizer()       # Cached
-        aligner = SpeakerAligner()      # Lightweight
-        data_saver = DataSaver(output_dir=output_dir)
-        
-        # Create orchestrator
-        orchestrator = AudioProcessingOrchestrator(
-            downloader, transcriber, diarizer, aligner, data_saver
-        )
-        
-        # Process audio
-        logger.info(f"Processing: {echo_input}")
-        speaker_transcriptions = orchestrator.extract_and_transcribe(echo_input)
-        
-        if speaker_transcriptions:
-            # Save results
-            output_path = os.path.join(output_dir, transcription_output)
-            data_saver.save_data(transcription_output, speaker_transcriptions)
-            
-            return {
-                "success": True,
-                "transcription": speaker_transcriptions,
-                "output_file": output_path,
-                "speaker_count": len(set(t[0] for t in speaker_transcriptions))
-            }
-        else:
-            return {"error": "Transcription failed"}
-            
-    except Exception as e:
-        logger.error(f"Processing failed: {e}")
-        return {"error": str(e)}
+    # Initialize components
+    downloader = get_downloader(echo_input, output_dir)
+    transcriber = WhisperAudioTranscriber()
+    diarizer = PyannoteDiarizer()
+    aligner = SpeakerAligner()
+    data_saver = DataSaver(output_dir=output_dir)
 
-# Entry point for serverless platforms
+    # Create an instance of AudioProcessingOrchestrator
+    orchestrator = AudioProcessingOrchestrator(downloader, transcriber, diarizer, aligner, data_saver)
+
+    # Process the input URL
+    logger.info("Starting transcription process...")
+    speaker_transcriptions = orchestrator.extract_and_transcribe(echo_input)
+    if speaker_transcriptions:
+        # Save the results to a file
+        data_saver.save_data(transcription_output, speaker_transcriptions)
+
+        logger.info(f"Transcriptions have been saved to {transcription_output}")
+
+        # Display the results
+        for speaker, start_time, end_time, segment_text in speaker_transcriptions:
+            logger.info(f"Speaker {speaker} ({start_time:.2f}s to {end_time:.2f}s): {segment_text}")
+    else:
+        logger.warning("No transcriptions were generated.")
+
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: python serverless_main.py <url>")
-        sys.exit(1)
-    
-    event = {"url": sys.argv[1]}
-    result = serverless_handler(event)
-    print(result)
+    parser = argparse.ArgumentParser(description="EchoInStone Audio Processing CLI")
+    parser.add_argument("echo_input", type=str, help="URL of the audio input (YouTube, podcast, or direct audio file)")
+    parser.add_argument("--output_dir", type=str, default="results", help="Directory to save the output files")
+    parser.add_argument("--transcription_output", type=str, default="speaker_transcriptions.json", help="Filename for the transcription output")
+
+    args = parser.parse_args()
+
+    main(args.echo_input, args.output_dir, args.transcription_output)
